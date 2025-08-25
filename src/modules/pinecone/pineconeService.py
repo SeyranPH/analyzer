@@ -1,6 +1,8 @@
 import os
+from typing import Optional
 from pinecone import Pinecone, ServerlessSpec
 from dotenv import load_dotenv
+import hashlib
 
 load_dotenv()
 
@@ -20,34 +22,77 @@ if index_name not in pc.list_indexes().names():
 
 index = pc.Index(index_name)
 
-def upsert_chunks(chunks: list[str], vectors: list[list[float]], namespace: str, metadata: dict = {}):
+def _stable_id(namespace: str, chunk: str, i: int) -> str:
+    h = hashlib.sha1(f"{namespace}|{i}|{chunk}".encode("utf-8")).hexdigest()[:20]
+    return f"{namespace}-{h}"
+
+def delete_namespace(namespace: str) -> None:
+    """Delete all vectors under a namespace."""
+    index.delete(namespace=namespace, delete_all=True)
+
+def delete_ids(ids: list[str], namespace: str) -> None:
+    """Delete specific ids under a namespace."""
+    if ids:
+        index.delete(ids=ids, namespace=namespace)
+
+def upsert_chunks(
+    chunks: list[str],
+    vectors: list[list[float]],
+    namespace: str,
+    metadata: dict = {},
+    batch_size: int = 100
+) -> int:
     """
     Upsert chunks + vectors to Pinecone in a given namespace.
+    Returns number upserted.
     """
-    ids = [f"{namespace}-{i}" for i in range(len(chunks))]
-    
-    vectors_to_upsert = []
-    for id_, vec, chunk in zip(ids, vectors, chunks):
-        vectors_to_upsert.append({
+    assert len(chunks) == len(vectors), "chunks and vectors length mismatch"
+
+    ids = [_stable_id(namespace, chunk, i) for i, chunk in enumerate(chunks)]
+    payloads = [
+        {
             "id": id_,
             "values": vec,
-            "metadata": {
-                "text": chunk,
-                **metadata
-            }
-        })
+            "metadata": {"text": chunk, **metadata},
+        }
+        for id_, vec, chunk in zip(ids, vectors, chunks)
+    ]
 
-    index.upsert(vectors=vectors_to_upsert, namespace=namespace)
+    total = 0
+    for i in range(0, len(payloads), batch_size):
+        batch = payloads[i : i + batch_size]
+        index.upsert(vectors=batch, namespace=namespace)
+        total += len(batch)
+    return total
 
 
-def query_chunks(query_vector: list[float], top_k: int = 5, namespace: str = "") -> list[str]:
+
+def query_chunks(
+    query_vector: list[float],
+    top_k: int = 5,
+    namespace: str = "",
+    score_threshold: Optional[float] = None,
+    metadata_filter: Optional[dict] = None
+) -> list[dict]:
     """
-    Query Pinecone and return text chunks from metadata.
+    Query Pinecone and return matches with id, score, text, metadata.
+    Optionally filter out low-score matches and apply a metadata filter.
     """
     res = index.query(
         vector=query_vector, 
         top_k=top_k, 
         namespace=namespace, 
-        include_metadata=True
+        include_metadata=True,
+        filter=metadata_filter or None
     )
-    return [match['metadata']['text'] for match in res['matches']] 
+    matches = [
+        {
+            "id": match['id'],
+            "score": match['score'],
+            "text": match['metadata']['text'] if 'text' in match['metadata'] else None,
+            "metadata": match['metadata']
+        }
+        for match in res['matches']
+        if score_threshold is None or match['score'] >= score_threshold
+    ]
+    return matches
