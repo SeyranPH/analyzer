@@ -1,17 +1,15 @@
 from fastapi import FastAPI
-from src.modules.user.userController import userRouter
 from src.modules.analysis.analysisController import analysisRouter
-from src.modules.user.userModel import database
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-@app.on_event("startup")
-async def startup():
-    await database.connect()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app.on_event("shutdown")
-async def shutdown():
-    await database.disconnect()
-
-app.include_router(userRouter)
 app.include_router(analysisRouter)

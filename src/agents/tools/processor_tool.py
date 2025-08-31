@@ -1,23 +1,19 @@
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 import json
+import time
 
 from .utils import split_text
 from src.modules.openai.openaiService import get_embeddings
 from src.modules.pinecone.pineconeService import upsert_chunks
 
-def processor_tool(text: str, namespace: str = "default", meta: Optional[Dict] = None):
-    """
-    Split -> embed -> upsert into Pinecone.
-    Returns a small summary payload for logging/agent use.
-    """
-    chunks = split_text(text)
-    vectors = get_embeddings(chunks)
-    upserted = upsert_chunks(chunks, vectors, namespace, metadata=meta or {})
-    return {
-        "namespace": namespace,
-        "chunks_count": len(chunks),
-        "upserted": upserted
-    }
+def processor_tool(text: str, namespace: str = "default", meta: Optional[Dict] = None) -> Dict[str, Any]:
+    try:
+        chunks = split_text(text, chunk_size=500, overlap=50)
+        vectors = get_embeddings(chunks)
+        upserted = upsert_chunks(chunks, vectors, namespace, metadata=meta or {})
+        return {"ok": True, "namespace": namespace, "chunks_count": len(chunks), "upserted": upserted}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 try:
     from pydantic import BaseModel, Field
@@ -31,7 +27,7 @@ try:
     processor_lc_tool = StructuredTool.from_function(
         name="process_and_upsert_tool",
         description="Split text, create OpenAI embeddings, and upsert to Pinecone under a namespace.",
-        func=lambda text, namespace="default", meta=None: processor_tool(text, namespace, meta),
+        func=processor_tool,
         args_schema=_ProcessorArgs,
     )
 except Exception:
@@ -51,14 +47,13 @@ processor_openai_schema = {
     }
 }
 
-def execute_processor_openai_tool(arguments_json: str):
-    """
-    Helper for OpenAI tool-calls:
-    - parse arguments json -> call processor_tool -> return dict result
-    """
+def execute_processor_openai_tool(arguments_json: str) -> Dict[str, Any]:
     args = json.loads(arguments_json or "{}")
+    text = args.get("text")
+    if not text:
+        return {"ok": False, "error": "Missing required parameter 'text'"}
     return processor_tool(
-        text=args["text"],
+        text=text,
         namespace=args.get("namespace", "default"),
         meta=args.get("meta")
     )

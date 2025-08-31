@@ -1,4 +1,3 @@
-
 from typing import Callable, Optional, Dict, Any
 
 def make_emit(cb: Optional[Callable[[str, Dict[str, Any]], None]] = None):

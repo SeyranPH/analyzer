@@ -1,49 +1,90 @@
-
 from fastapi import APIRouter, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any
+import json
+import asyncio
+
 from src.agents.tools import scout_tool, reader_tool, processor_tool
-from src.agents.answering_agent import run_answering_agent
+from src.agents.answering_agent import run_answering_agent_stream, run_answering_agent
 
 analysisRouter = APIRouter(prefix="/analysis", tags=["analysis"])
 
 class CreateAnalysisBody(BaseModel):
     analysisQuery: str
 
-@analysisRouter.post("/", status_code=status.HTTP_201_CREATED)
-async def create_analysis(body: CreateAnalysisBody):
-    results = scout_tool(body.analysisQuery)
-    return {"arxiv_results": results}
-
 class ReadPdfBody(BaseModel):
     pdfUrl: str
-
-@analysisRouter.post("/pdf", status_code=status.HTTP_201_CREATED)
-async def read_pdf(body: ReadPdfBody):
-    results = reader_tool(body.pdfUrl)  # returns dict if you adopted the wrapper; ok either way
-    return {"pdf_text": results}
 
 class ProcessorText(BaseModel):
     text: str
     namespace: str = "default"
     meta: Dict[str, Any] | None = None
 
-@analysisRouter.post("/processor", status_code=status.HTTP_201_CREATED)
-async def process_text(body: ProcessorText):
-    results = processor_tool(body.text, namespace=body.namespace, meta=body.meta)
-    return {"processor_result": results}
 
 class AnswerRequest(BaseModel):
     question: str
     namespace: str = "default"
     threshold: float = 0.70
 
+@analysisRouter.post("/arxiv-query", status_code=status.HTTP_201_CREATED)
+async def create_analysis(body: CreateAnalysisBody):
+    results = scout_tool(body.analysisQuery)
+    return {"arxiv_results": results}
+
+
+@analysisRouter.post("/pdf", status_code=status.HTTP_201_CREATED)
+async def read_pdf(body: ReadPdfBody):
+    results = reader_tool(body.pdfUrl)
+    return {"pdf_text": results}
+
+
+@analysisRouter.post("/processor", status_code=status.HTTP_201_CREATED)
+async def process_text(body: ProcessorText):
+    results = processor_tool(body.text, namespace=body.namespace, meta=body.meta)
+    return {"processor_result": results}
+
+
 @analysisRouter.post("/answer", status_code=status.HTTP_200_OK)
 async def answer(req: AnswerRequest):
     """
-    1) Try RAG using Pinecone.
-    2) If not enough context → the agent uses tools (scout/reader/processor) to fetch & index.
-    3) RAG again and return final answer + the steps taken.
+    Streaming endpoint (SSE) that uses the intelligent agent to answer questions.
+    """
+
+    async def event_generator():
+        steps: List[Dict[str, Any]] = []
+
+        def emit(event: str, data: Dict[str, Any]):
+            steps.append({"event": event, "data": data})
+
+        try:
+            async for result in run_answering_agent_stream(
+                question=req.question,
+                namespace=req.namespace,
+                threshold=req.threshold,
+                emit=emit
+            ):
+                yield f"data: {json.dumps({'type': 'result', 'data': result})}\n\n"
+
+        except Exception as e:
+            error_msg = {"event": "error", "data": {"error": str(e)}}
+            yield f"data: {json.dumps(error_msg)}\n\n"
+
+        for step in steps:
+            yield f"data: {json.dumps(step)}\n\n"
+
+        yield f"data: {json.dumps({'event': 'complete', 'data': {'steps': steps}})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+@analysisRouter.post("/answer/sync", status_code=status.HTTP_200_OK)
+async def answer_sync(req: AnswerRequest):
+    """
+    Synchronous endpoint for backward compatibility.
     """
     steps: List[Dict[str, Any]] = []
 
